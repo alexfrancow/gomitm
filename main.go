@@ -237,6 +237,9 @@ func redirectTrafic(mux *http.ServeMux, stack *fifo.Group) *fifo.Group {
 	return topg
 }
 
+//RoundTripper is an interface representing the ability to execute a single HTTP transaction, obtaining the Response for a given Request
+//It sits in between the low level stuff like dialing, tcp, etc. and the high level details of HTTP (redirects, etc.)
+//RoundTrip is the method do do a single round trip of request sent to server, server answers with response
 func GetRoundTripper() *http.Transport {
 	tr := &http.Transport{
 		Dial: (&net.Dialer{
