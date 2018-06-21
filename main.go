@@ -95,9 +95,8 @@ func main() {
 	p.SetRequestModifier(topg)
 	p.SetResponseModifier(topg)
 
-	m := martianhttp.NewModifier()
-	fg.AddRequestModifier(m)
-	fg.AddResponseModifier(m)
+	//New martian modifier
+	m := MartianModifier(fg)
 
 	//Log conf for har files
 	SetHarLogging(mux, stack)
@@ -129,6 +128,13 @@ func main() {
 	<-sigc
 
 	log.Println("martian: shutting down")
+}
+
+func MartianModifier(fg *fifo.Group) *martianhttp.Modifier {
+	m := martianhttp.NewModifier()
+	fg.AddRequestModifier(m)
+	fg.AddResponseModifier(m)
+	return m
 }
 
 func SetTCPApiAddress(err error) net.Listener {
