@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,7 +22,6 @@ import (
 	"github.com/google/martian/httpspec"
 	"github.com/google/martian/marbl"
 	"github.com/google/martian/martianhttp"
-	"github.com/google/martian/martianlog"
 	"github.com/google/martian/mitm"
 	"github.com/google/martian/servemux"
 	"github.com/google/martian/trafficshape"
@@ -42,6 +40,9 @@ import (
 	_ "github.com/google/martian/stash"
 	_ "github.com/google/martian/static"
 	_ "github.com/google/martian/status"
+
+	"log"
+	"github.com/google/martian/martianlog"
 )
 
 
@@ -69,17 +70,8 @@ func main() {
 	p := martian.NewProxy()
 	defer p.Close()
 
-	tr := &http.Transport{
-		Dial: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).Dial,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: time.Second,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: *skipTLSVerify,
-		},
-	}
+	tr := GetRoundTripper()
+
 	p.SetRoundTripper(tr)
 
 	if *dsProxyURL != "" {
@@ -92,28 +84,167 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	var x509c *x509.Certificate
-	var priv interface{}
+	x509c, priv := ManageProxyCertificate()
 
-	if *generateCA {
-		var err error
-		x509c, priv, err = mitm.NewAuthority("martian.proxy", "Martian Authority", 30*24*time.Hour)
-		if err != nil {
-			log.Fatal(err)
-		}
-	} else if *cert != "" && *key != "" {
-		tlsc, err := tls.LoadX509KeyPair(*cert, *key)
-		if err != nil {
-			log.Fatal(err)
-		}
-		priv = tlsc.PrivateKey
+	SetUpTLS(x509c, priv, p, mux)
 
-		x509c, err = x509.ParseCertificate(tlsc.Certificate[0])
-		if err != nil {
-			log.Fatal(err)
-		}
+	stack, fg := httpspec.NewStack("martian")
+
+	topg := redirectTrafic(mux, stack)
+
+	p.SetRequestModifier(topg)
+	p.SetResponseModifier(topg)
+
+	m := martianhttp.NewModifier()
+	fg.AddRequestModifier(m)
+	fg.AddResponseModifier(m)
+
+	setHarLogging(mux, stack)
+
+	SetMarblLogging(mux, stack)
+
+	// Configure modifiers.
+	configure("/configure", m, mux)
+
+	VerifyAssertions(m, mux)
+
+	// Reset verifications.
+	ResetVerifications(m, mux)
+
+	l, err := SetTCPAddress(mux)
+
+	lAPI := SetTCPApiAddress(err)
+
+	log.Printf("martian: starting proxy on %s and api on %s", l.Addr().String(), lAPI.Addr().String())
+
+	go p.Serve(l)
+
+	go http.Serve(lAPI, mux)
+
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, os.Kill)
+
+	<-sigc
+
+	log.Println("martian: shutting down")
+}
+
+func SetTCPApiAddress(err error) net.Listener {
+	lAPI, err := net.Listen("tcp", *apiAddr)
+	if err != nil {
+		log.Fatal(err)
 	}
+	return lAPI
+}
 
+func SetTCPAddress(mux *http.ServeMux) (net.Listener, error) {
+	l, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *trafficShaping {
+		tsl := trafficshape.NewListener(l)
+		tsh := trafficshape.NewHandler(tsl)
+		configure("/shape-traffic", tsh, mux)
+
+		l = tsl
+	}
+	return l, err
+}
+
+func ResetVerifications(m *martianhttp.Modifier, mux *http.ServeMux) {
+	rh := verify.NewResetHandler()
+	rh.SetRequestVerifier(m)
+	rh.SetResponseVerifier(m)
+	configure("/verify/reset", rh, mux)
+}
+
+func VerifyAssertions(m *martianhttp.Modifier, mux *http.ServeMux) {
+	// Verify assertions.
+	vh := verify.NewHandler()
+	vh.SetRequestVerifier(m)
+	vh.SetResponseVerifier(m)
+	configure("/verify", vh, mux)
+}
+
+func SetMarblLogging(mux *http.ServeMux, stack *fifo.Group) {
+	if *marblLogging {
+		lsh := marbl.NewHandler()
+		lsm := marbl.NewModifier(lsh)
+		muxf := servemux.NewFilter(mux)
+		muxf.RequestWhenFalse(lsm)
+		muxf.ResponseWhenFalse(lsm)
+		stack.AddRequestModifier(muxf)
+		stack.AddResponseModifier(muxf)
+
+		// retrieve binary marbl logs
+		mux.Handle("/binlogs", lsh)
+	}
+}
+
+func setHarLogging(mux *http.ServeMux, stack *fifo.Group) {
+
+	logger := martianlog.NewLogger()
+	logger.SetDecode(true)
+
+	stack.AddRequestModifier(logger)
+	stack.AddResponseModifier(logger)
+
+	if *harLogging {
+		hl := har.NewLogger()
+		muxf := servemux.NewFilter(mux)
+		// Only append to HAR logs when the requests are not API requests,
+		// that is, they are not matched in http.DefaultServeMux
+		muxf.RequestWhenFalse(hl)
+		muxf.ResponseWhenFalse(hl)
+
+		stack.AddRequestModifier(muxf)
+		stack.AddResponseModifier(muxf)
+
+		configure("/logs", har.NewExportHandler(hl), mux)
+		configure("/logs/reset", har.NewResetHandler(hl), mux)
+	}
+}
+
+func redirectTrafic(mux *http.ServeMux, stack *fifo.Group) *fifo.Group {
+	// wrap stack in a group so that we can forward API requests to the API port
+	// before the httpspec modifiers which include the via modifier which will
+	// trip loop detection
+	topg := fifo.NewGroup()
+	// Redirect API traffic to API server.
+	if *apiAddr != "" {
+		apip := strings.Replace(*apiAddr, ":", "", 1)
+		port, err := strconv.Atoi(apip)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Forward traffic that pattern matches in http.DefaultServeMux
+		apif := servemux.NewFilter(mux)
+		apif.SetRequestModifier(mapi.NewForwarder("", port))
+		topg.AddRequestModifier(apif)
+	}
+	topg.AddRequestModifier(stack)
+	topg.AddResponseModifier(stack)
+	return topg
+}
+
+func GetRoundTripper() *http.Transport {
+	tr := &http.Transport{
+		Dial: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).Dial,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: *skipTLSVerify,
+		},
+	}
+	return tr
+}
+
+func SetUpTLS(x509c *x509.Certificate, priv interface{}, p *martian.Proxy, mux *http.ServeMux) {
 	if x509c != nil && priv != nil {
 		mc, err := mitm.NewConfig(x509c, priv)
 		if err != nil {
@@ -138,116 +269,30 @@ func main() {
 
 		go p.Serve(tls.NewListener(tl, mc.TLS()))
 	}
+}
 
-	stack, fg := httpspec.NewStack("martian")
-
-	// wrap stack in a group so that we can forward API requests to the API port
-	// before the httpspec modifiers which include the via modifier which will
-	// trip loop detection
-	topg := fifo.NewGroup()
-
-	// Redirect API traffic to API server.
-	if *apiAddr != "" {
-		apip := strings.Replace(*apiAddr, ":", "", 1)
-		port, err := strconv.Atoi(apip)
+func ManageProxyCertificate() (*x509.Certificate, interface{}) {
+	var x509c *x509.Certificate
+	var priv interface{}
+	if *generateCA {
+		var err error
+		x509c, priv, err = mitm.NewAuthority("martian.proxy", "Martian Authority", 30*24*time.Hour)
 		if err != nil {
 			log.Fatal(err)
 		}
+	} else if *cert != "" && *key != "" {
+		tlsc, err := tls.LoadX509KeyPair(*cert, *key)
+		if err != nil {
+			log.Fatal(err)
+		}
+		priv = tlsc.PrivateKey
 
-		// Forward traffic that pattern matches in http.DefaultServeMux
-		apif := servemux.NewFilter(mux)
-		apif.SetRequestModifier(mapi.NewForwarder("", port))
-		topg.AddRequestModifier(apif)
+		x509c, err = x509.ParseCertificate(tlsc.Certificate[0])
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
-	topg.AddRequestModifier(stack)
-	topg.AddResponseModifier(stack)
-
-	p.SetRequestModifier(topg)
-	p.SetResponseModifier(topg)
-
-	m := martianhttp.NewModifier()
-	fg.AddRequestModifier(m)
-	fg.AddResponseModifier(m)
-
-	if *harLogging {
-		hl := har.NewLogger()
-		muxf := servemux.NewFilter(mux)
-		// Only append to HAR logs when the requests are not API requests,
-		// that is, they are not matched in http.DefaultServeMux
-		muxf.RequestWhenFalse(hl)
-		muxf.ResponseWhenFalse(hl)
-
-		stack.AddRequestModifier(muxf)
-		stack.AddResponseModifier(muxf)
-
-		configure("/logs", har.NewExportHandler(hl), mux)
-		configure("/logs/reset", har.NewResetHandler(hl), mux)
-	}
-
-	logger := martianlog.NewLogger()
-	logger.SetDecode(true)
-
-	stack.AddRequestModifier(logger)
-	stack.AddResponseModifier(logger)
-
-	if *marblLogging {
-		lsh := marbl.NewHandler()
-		lsm := marbl.NewModifier(lsh)
-		muxf := servemux.NewFilter(mux)
-		muxf.RequestWhenFalse(lsm)
-		muxf.ResponseWhenFalse(lsm)
-		stack.AddRequestModifier(muxf)
-		stack.AddResponseModifier(muxf)
-
-		// retrieve binary marbl logs
-		mux.Handle("/binlogs", lsh)
-	}
-
-	// Configure modifiers.
-	configure("/configure", m, mux)
-
-	// Verify assertions.
-	vh := verify.NewHandler()
-	vh.SetRequestVerifier(m)
-	vh.SetResponseVerifier(m)
-	configure("/verify", vh, mux)
-
-	// Reset verifications.
-	rh := verify.NewResetHandler()
-	rh.SetRequestVerifier(m)
-	rh.SetResponseVerifier(m)
-	configure("/verify/reset", rh, mux)
-
-	l, err := net.Listen("tcp", *addr)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if *trafficShaping {
-		tsl := trafficshape.NewListener(l)
-		tsh := trafficshape.NewHandler(tsl)
-		configure("/shape-traffic", tsh, mux)
-
-		l = tsl
-	}
-
-	lAPI, err := net.Listen("tcp", *apiAddr)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("martian: starting proxy on %s and api on %s", l.Addr().String(), lAPI.Addr().String())
-
-	go p.Serve(l)
-
-	go http.Serve(lAPI, mux)
-
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, os.Kill)
-
-	<-sigc
-
-	log.Println("martian: shutting down")
+	return x509c, priv
 }
 
 func init() {
