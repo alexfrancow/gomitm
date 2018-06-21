@@ -99,8 +99,10 @@ func main() {
 	fg.AddRequestModifier(m)
 	fg.AddResponseModifier(m)
 
-	setHarLogging(mux, stack)
+	//Log conf for har files
+	SetHarLogging(mux, stack)
 
+	//Log conf streams http logs
 	SetMarblLogging(mux, stack)
 
 	// Configure modifiers.
@@ -182,7 +184,7 @@ func SetMarblLogging(mux *http.ServeMux, stack *fifo.Group) {
 	}
 }
 
-func setHarLogging(mux *http.ServeMux, stack *fifo.Group) {
+func SetHarLogging(mux *http.ServeMux, stack *fifo.Group) {
 
 	logger := martianlog.NewLogger()
 	logger.SetDecode(true)
