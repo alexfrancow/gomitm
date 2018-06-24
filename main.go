@@ -43,6 +43,7 @@ import (
 
 	"log"
 	"github.com/google/martian/martianlog"
+	"fmt"
 )
 
 
@@ -185,9 +186,12 @@ func SetMarblLogging(mux *http.ServeMux, stack *fifo.Group) {
 		stack.AddRequestModifier(muxf)
 		stack.AddResponseModifier(muxf)
 
+
+
 		// retrieve binary marbl logs
 		mux.Handle("/binlogs", lsh)
 	}
+
 }
 
 func SetHarLogging(mux *http.ServeMux, stack *fifo.Group) {
@@ -206,12 +210,18 @@ func SetHarLogging(mux *http.ServeMux, stack *fifo.Group) {
 		muxf.RequestWhenFalse(hl)
 		muxf.ResponseWhenFalse(hl)
 
+
 		stack.AddRequestModifier(muxf)
 		stack.AddResponseModifier(muxf)
 
 		configure("/logs", har.NewExportHandler(hl), mux)
 		configure("/logs/reset", har.NewResetHandler(hl), mux)
 	}
+}
+
+func PrintRequest(w http.ResponseWriter, r *http.Request) {
+	fmt.Println(r);
+	fmt.Println("iiiiiiiiiiiii");
 }
 
 func redirectTrafic(mux *http.ServeMux, stack *fifo.Group) *fifo.Group {
@@ -226,7 +236,6 @@ func redirectTrafic(mux *http.ServeMux, stack *fifo.Group) *fifo.Group {
 		if err != nil {
 			log.Fatal(err)
 		}
-
 		// Forward traffic that pattern matches in http.DefaultServeMux
 		apif := servemux.NewFilter(mux)
 		apif.SetRequestModifier(mapi.NewForwarder("", port))
@@ -316,8 +325,9 @@ func configure(pattern string, handler http.Handler, mux *http.ServeMux) {
 	// register handler for martian.proxy to be forwarded to
 	// local API server
 	mux.Handle(path.Join(*api, pattern), handler)
-
 	// register handler for local API server
 	p := path.Join("localhost"+*apiAddr, pattern)
 	mux.Handle(p, handler)
 }
+
+
