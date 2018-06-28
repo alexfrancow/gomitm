@@ -42,7 +42,7 @@ import (
 	_ "github.com/google/martian/status"
 
 	"log"
-	"github.com/google/martian/martianlog"
+	"bufio"
 	"fmt"
 )
 
@@ -72,7 +72,6 @@ func main() {
 	defer p.Close()
 
 	tr := GetRoundTripper()
-
 	p.SetRoundTripper(tr)
 
 	if *dsProxyURL != "" {
@@ -122,6 +121,8 @@ func main() {
 	go p.Serve(l)
 
 	go http.Serve(lAPI, mux)
+
+	WraperLogs(l)
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt, os.Kill)
@@ -186,21 +187,13 @@ func SetMarblLogging(mux *http.ServeMux, stack *fifo.Group) {
 		stack.AddRequestModifier(muxf)
 		stack.AddResponseModifier(muxf)
 
-
-
 		// retrieve binary marbl logs
-		mux.Handle("/binlogs", lsh)
+		mux.Handle("/binlogs", LogWrapper(lsh))
 	}
 
 }
 
 func SetHarLogging(mux *http.ServeMux, stack *fifo.Group) {
-
-	logger := martianlog.NewLogger()
-	logger.SetDecode(true)
-
-	stack.AddRequestModifier(logger)
-	stack.AddResponseModifier(logger)
 
 	if *harLogging {
 		hl := har.NewLogger()
@@ -210,7 +203,6 @@ func SetHarLogging(mux *http.ServeMux, stack *fifo.Group) {
 		muxf.RequestWhenFalse(hl)
 		muxf.ResponseWhenFalse(hl)
 
-
 		stack.AddRequestModifier(muxf)
 		stack.AddResponseModifier(muxf)
 
@@ -219,10 +211,6 @@ func SetHarLogging(mux *http.ServeMux, stack *fifo.Group) {
 	}
 }
 
-func PrintRequest(w http.ResponseWriter, r *http.Request) {
-	fmt.Println(r);
-	fmt.Println("iiiiiiiiiiiii");
-}
 
 func redirectTrafic(mux *http.ServeMux, stack *fifo.Group) *fifo.Group {
 	// wrap stack in a group so that we can forward API requests to the API port
@@ -283,6 +271,7 @@ func SetUpTLS(x509c *x509.Certificate, priv interface{}, p *martian.Proxy, mux *
 
 		// Start TLS listener for transparent MITM.
 		tl, err := net.Listen("tcp", *tlsAddr)
+
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -327,10 +316,81 @@ func configure(pattern string, handler http.Handler, mux *http.ServeMux) {
 
 	// register handler for martian.proxy to be forwarded to
 	// local API server
+	//handler
 	mux.Handle(path.Join(*api, pattern), handler)
 	// register handler for local API server
 	p := path.Join("localhost"+*apiAddr, pattern)
 	mux.Handle(p, handler)
 }
 
+
+func LogWrapper(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Println(r)
+		h.ServeHTTP(w, r)
+		log.Println("holaa")
+	})
+}
+
+
+func WraperLogs(l net.Listener) {
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			log.Println("Error accepting connection. ", err)
+		}
+		go HandleConnection(conn)
+	}
+}
+
+
+// Forward the request to the remote host and pass response back to client
+func HandleConnection(localConn net.Conn) {
+	brw := bufio.NewReadWriter(bufio.NewReader(localConn), bufio.NewWriter(localConn))
+
+	var req *http.Request
+
+	reqc := make(chan *http.Request, 1)
+	errc := make(chan error, 1)
+	r, err := http.ReadRequest(brw.Reader)
+
+	if err != nil {
+		errc <- err
+		return
+	}
+
+	reqc <- r
+	req = <-reqc
+
+	log.Printf(formatRequest(req))
+
+	defer req.Body.Close()
+}
+
+
+func formatRequest(r *http.Request) string {
+	// Create return string
+	var request []string
+	// Add the request string
+	url := fmt.Sprintf("%v %v %v", r.Method, r.URL, r.Proto)
+	request = append(request, url)
+	// Add the host
+	request = append(request, fmt.Sprintf("Host: %v", r.Host))
+	// Loop through headers
+	for name, headers := range r.Header {
+		name = strings.ToLower(name)
+		for _, h := range headers {
+			request = append(request, fmt.Sprintf("%v: %v", name, h))
+		}
+	}
+
+	// If this is a POST, add post data
+	if r.Method == "POST" {
+		r.ParseForm()
+		request = append(request, "\n")
+		request = append(request, r.Form.Encode())
+	}
+	// Return the request as a string
+	return strings.Join(request, "\n")
+}
 
