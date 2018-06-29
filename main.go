@@ -133,12 +133,15 @@ func main() {
 }
 
 func MartianModifier(fg *fifo.Group) *martianhttp.Modifier {
+	//NewModifier returns a new martianhttp.Modifier.
+	//martian/martianhttp
 	m := martianhttp.NewModifier()
 	fg.AddRequestModifier(m)
 	fg.AddResponseModifier(m)
 	return m
 }
 
+//Create API Server
 func SetTCPApiAddress(err error) net.Listener {
 	lAPI, err := net.Listen("tcp", *apiAddr)
 	if err != nil {
@@ -147,6 +150,7 @@ func SetTCPApiAddress(err error) net.Listener {
 	return lAPI
 }
 
+//Create Server
 func SetTCPAddress(mux *http.ServeMux) (net.Listener, error) {
 	l, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -179,6 +183,8 @@ func VerifyAssertions(m *martianhttp.Modifier, mux *http.ServeMux) {
 
 func SetMarblLogging(mux *http.ServeMux, stack *fifo.Group) {
 	if *marblLogging {
+		//NewHandler instantiates a Handler with an empty set of subscriptions.
+		//google/martian/marbl
 		lsh := marbl.NewHandler()
 		lsm := marbl.NewModifier(lsh)
 		muxf := servemux.NewFilter(mux)
@@ -234,9 +240,12 @@ func redirectTrafic(mux *http.ServeMux, stack *fifo.Group) *fifo.Group {
 	return topg
 }
 
-//RoundTripper is an interface representing the ability to execute a single HTTP transaction, obtaining the Response for a given Request
-//It sits in between the low level stuff like dialing, tcp, etc. and the high level details of HTTP (redirects, etc.)
-//RoundTrip is the method do do a single round trip of request sent to server, server answers with response
+//RoundTripper is an interface representing the ability to execute a single
+//HTTP transaction, obtaining the Response for a given Request
+//It sits in between the low level stuff like dialing, tcp, etc. and the
+//high level details of HTTP (redirects, etc.)
+//RoundTrip is the method do do a single round trip of request sent to server,
+//server answers with response
 func GetRoundTripper() *http.Transport {
 	tr := &http.Transport{
 		Dial: (&net.Dialer{
@@ -254,6 +263,9 @@ func GetRoundTripper() *http.Transport {
 
 func SetUpTLS(x509c *x509.Certificate, priv interface{}, p *martian.Proxy, mux *http.ServeMux) {
 	if x509c != nil && priv != nil {
+		//NewConfig creates a MITM config using the CA certificate
+		//and private key to generate on-the-fly certificates.
+		//google/martian/mitm
 		mc, err := mitm.NewConfig(x509c, priv)
 		if err != nil {
 			log.Fatal(err)
@@ -263,6 +275,8 @@ func SetUpTLS(x509c *x509.Certificate, priv interface{}, p *martian.Proxy, mux *
 		mc.SetOrganization(*organization)
 		mc.SkipTLSVerify(*skipTLSVerify)
 
+		//SetMITM sets the config to use for MITMing of CONNECT requests.
+		//google/martian
 		p.SetMITM(mc)
 
 		// Expose certificate authority.
@@ -285,11 +299,18 @@ func ManageProxyCertificate() (*x509.Certificate, interface{}) {
 	var priv interface{}
 	if *generateCA {
 		var err error
+
+		//NewAuthority creates a new CA certificate and associated private key.
+		//google/martian/mitm
 		x509c, priv, err = mitm.NewAuthority("martian.proxy", "Martian Authority", 30*24*time.Hour)
 		if err != nil {
 			log.Fatal(err)
 		}
 	} else if *cert != "" && *key != "" {
+		//LoadX509KeyPair reads and parses a public/private key pair from a pair of files.
+		//The files must contain PEM encoded data. The certificate file may contain intermediate
+		//certificates following the leaf certificate to form a certificate chain.
+		//On successful return, Certificate.Leaf will be nil because the parsed form of the certificate is not retained.
 		tlsc, err := tls.LoadX509KeyPair(*cert, *key)
 		if err != nil {
 			log.Fatal(err)
